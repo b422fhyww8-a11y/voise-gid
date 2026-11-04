@@ -1,0 +1,142 @@
+let map, userMarker, userPos = null;
+let userHeading = null;          // направление взгляда (компас)
+let lastMoveHeading = null;      // направление движения (запасной режим)
+let spoken = new Set();          // какие места уже озвучены
+let started = false;
+
+// ---------- Карта ----------
+function initMap() {
+  map = L.map('map').setView([59.9386, 30.3141], 14);
+  L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '© OpenStreetMap'
+  }).addTo(map);
+
+  PLACES.forEach(p => {
+    L.marker([p.lat, p.lng]).addTo(map).bindPopup(`<b>${p.name}</b><br>${p.description}`);
+  });
+}
+
+// ---------- Расстояние (м) ----------
+function distance(lat1, lon1, lat2, lon2) {
+  const R = 6371000;
+  const toRad = d => d * Math.PI / 180;
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a = Math.sin(dLat/2)**2 +
+            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon/2)**2;
+  return 2 * R * Math.asin(Math.sqrt(a));
+}
+
+// ---------- Азимут на объект ----------
+function bearing(lat1, lon1, lat2, lon2) {
+  const toRad = d => d * Math.PI / 180;
+  const toDeg = r => r * 180 / Math.PI;
+  const y = Math.sin(toRad(lon2 - lon1)) * Math.cos(toRad(lat2));
+  const x = Math.cos(toRad(lat1)) * Math.sin(toRad(lat2)) -
+            Math.sin(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.cos(toRad(lon2 - lon1));
+  return (toDeg(Math.atan2(y, x)) + 360) % 360;
+}
+
+// ---------- Сторона света ----------
+function sideOf(bearingTo, heading) {
+  if (heading === null) return "рядом";
+  let diff = (bearingTo - heading + 540) % 360 - 180; // -180..180
+  if (Math.abs(diff) <= 45) return "впереди";
+  if (diff > 45 && diff <= 135) return "справа";
+  if (diff < -45 && diff >= -135) return "слева";
+  return "позади";
+}
+
+// ---------- Озвучка ----------
+function speak(text) {
+  const u = new SpeechSynthesisUtterance(text);
+  u.lang = 'ru-RU';
+  u.rate = 0.95;
+  speechSynthesis.cancel();
+  speechSynthesis.speak(u);
+}
+
+// ---------- Проверка объектов ----------
+function checkPlaces() {
+  if (!userPos) return;
+  const heading = userHeading !== null ? userHeading : lastMoveHeading;
+
+  PLACES.forEach(p => {
+    const d = distance(userPos.lat, userPos.lng, p.lat, p.lng);
+    if (d <= p.radius && !spoken.has(p.name)) {
+      spoken.add(p.name);
+      const side = sideOf(bearing(userPos.lat, userPos.lng, p.lat, p.lng), heading);
+      const prefix = side === "рядом" ? "" : ` ${side}`;
+      speak(`${p.name}${prefix}. ${p.description}`);
+      document.getElementById('lastPlace').innerHTML =
+        `<b>${p.name}</b> — ${side}<br>${p.description}`;
+    }
+    if (d > p.radius + 20) spoken.delete(p.name); // вышли из зоны — можно снова
+  });
+}
+
+// ---------- Геолокация ----------
+function startGeo() {
+  if (!navigator.geolocation) {
+    alert('Геолокация не поддерживается');
+    return;
+  }
+  navigator.geolocation.watchPosition(pos => {
+    userPos = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+    if (pos.coords.heading !== null && !isNaN(pos.coords.heading)) {
+      lastMoveHeading = pos.coords.heading;
+    }
+    if (!userMarker) {
+      userMarker = L.circleMarker([userPos.lat, userPos.lng], {
+        radius: 8, color: '#1a73e8', fillColor: '#1a73e8', fillOpacity: 1
+      }).addTo(map);
+      map.setView([userPos.lat, userPos.lng], 16);
+    } else {
+      userMarker.setLatLng([userPos.lat, userPos.lng]);
+    }
+    checkPlaces();
+  }, err => {
+    document.getElementById('status').textContent = 'Ошибка геолокации: ' + err.message;
+  }, { enableHighAccuracy: true, maximumAge: 2000 });
+}
+
+// ---------- Компас ----------
+async function startCompass() {
+  try {
+    if (typeof DeviceOrientationEvent !== 'undefined' &&
+        typeof DeviceOrientationEvent.requestPermission === 'function') {
+      const perm = await DeviceOrientationEvent.requestPermission();
+      if (perm !== 'granted') { alert('Доступ к компасу отклонён'); return; }
+    }
+    window.addEventListener('deviceorientationabsolute', onOrient, true);
+    window.addEventListener('deviceorientation', onOrient, true);
+    document.getElementById('status').textContent = 'Компас включён';
+    document.getElementById('compassBtn').hidden = true;
+  } catch (e) {
+    alert('Компас недоступен: ' + e.message);
+  }
+}
+
+function onOrient(e) {
+  let h = null;
+  if (e.webkitCompassHeading !== undefined) h = e.webkitCompassHeading;   // iOS
+  else if (e.absolute && e.alpha !== null) h = 360 - e.alpha;             // Android
+  else if (e.alpha !== null) h = 360 - e.alpha;
+  if (h !== null) userHeading = h;
+}
+
+// ---------- Кнопки ----------
+document.getElementById('startBtn').addEventListener('click', () => {
+  started = true;
+  document.getElementById('status').textContent = 'Гид работает. Идите по маршруту.';
+  document.getElementById('startBtn').hidden = true;
+  document.getElementById('compassBtn').hidden = false;
+  speak('Голосовой гид запущен. Приятной прогулки!');
+  startGeo();
+  setInterval(checkPlaces, 3000);
+});
+
+document.getElementById('compassBtn').addEventListener('click', startCompass);
+
+// ---------- Старт ----------
+initMap();
